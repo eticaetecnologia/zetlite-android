@@ -20,6 +20,22 @@ class Store(private val ctx: Context) {
     fun target(f: File): Int = prefs.getInt("t_" + f.path.hashCode(), 0)
     fun setTarget(f: File, n: Int) = prefs.edit().putInt("t_" + f.path.hashCode(), n).apply()
 
+    fun recents(): List<String> =
+        (prefs.getString("recents", "") ?: "").split("\n").filter { it.isNotBlank() }
+
+    fun addRecent(d: File) {
+        val l = listOf(d.path) + recents().filter { it != d.path }
+        prefs.edit().putString("recents", l.take(8).joinToString("\n")).apply()
+    }
+
+    var openTabs: List<String>
+        get() = (prefs.getString("tabs", "") ?: "").split("\n").filter { it.isNotBlank() }
+        set(v) = prefs.edit().putString("tabs", v.joinToString("\n")).apply()
+
+    var curTab: Int
+        get() = prefs.getInt("cur", -1)
+        set(v) = prefs.edit().putInt("cur", v).apply()
+
     fun ensureRoot(): Boolean = root.exists() || root.mkdirs()
 
     fun notes(): List<File> =
@@ -41,8 +57,8 @@ class Store(private val ctx: Context) {
 
     private fun safe(name: String) = name.trim().replace(Regex("[\\\\/:*?\"<>|]"), "_")
 
-    fun create(name: String): File {
-        val f = File(root, safe(name) + ".md")
+    fun create(name: String, dir: File = root): File {
+        val f = File(dir, safe(name) + ".md")
         if (!f.exists()) write(f, "# ${name.trim()}\n\n")
         return f
     }
