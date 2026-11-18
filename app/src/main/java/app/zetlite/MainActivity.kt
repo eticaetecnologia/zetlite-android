@@ -837,11 +837,11 @@ class MainActivity : Activity() {
 
     // ------------------------------------------------------------------ pasta de trabalho
     private fun workspaceMenu() {
-        val rec = store.recents().filter { File(it).isDirectory }
-        val labels = rec.map { File(it).name + "   (" + it + ")" } + "Procurar pasta…"
+        val rec = store.recents().filter { File(it).isDirectory && it != store.root.path }
+        val labels = listOf("\uD83D\uDCC2 Procurar pasta\u2026") + rec.map { "\uD83D\uDD58 " + File(it).name + "   (" + it + ")" }
         AlertDialog.Builder(this).setTitle("Pasta de trabalho")
             .setItems(labels.toTypedArray()) { _, i ->
-                if (i < rec.size) setWorkspace(File(rec[i])) else pickFolder(store.root) { setWorkspace(it) }
+                if (i == 0) pickFolder(store.root) { setWorkspace(it) } else setWorkspace(File(rec[i - 1]))
             }.show()
     }
 
@@ -857,36 +857,146 @@ class MainActivity : Activity() {
         renderAll()
     }
 
-    private fun pickFolder(start: File, onPick: (File) -> Unit) {
-        var dir = if (start.isDirectory) start else Environment.getExternalStorageDirectory()
-        var subs: List<File> = emptyList()
-        val items = ArrayList<String>()
-        val adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, items)
-        val lv = ListView(this).apply { this.adapter = adapter }
-        val dlg = AlertDialog.Builder(this).setView(lv)
-            .setPositiveButton("Usar esta pasta") { _, _ -> onPick(dir) }
-            .setNegativeButton("Cancelar", null).create()
-        fun hasUp() = dir.parentFile != null && dir.path != "/"
-        fun load() {
-            subs = dir.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") }
-                ?.sortedBy { it.name.lowercase() } ?: emptyList()
-            items.clear()
-            items.add("＋ Nova pasta aqui")
-            if (hasUp()) items.add("⬆ Subir")
-            subs.forEach { items.add("📁 " + it.name) }
-            adapter.notifyDataSetChanged()
-            dlg.setTitle(dir.path)
-        }
-        lv.setOnItemClickListener { _, _, pos, _ ->
-            val off = if (hasUp()) 2 else 1
-            when {
-                pos == 0 -> ask("Nome da nova pasta") { n ->
-                    if (n.isNotBlank()) { File(dir, n.trim()).mkdirs(); load() }
-                }
-                pos == 1 && hasUp() -> { dir = dir.parentFile!!; load() }
-                else -> { dir = subs[pos - off]; load() }
+    /** Armazenamentos disponíveis: interno e, se houver, cartão SD / USB. */
+    private fun volumes(): List<Pair<String, File>> {
+        val internal = Environment.getExternalStorageDirectory()
+        val out = ArrayList<Pair<String, File>>()
+        out.add("\uD83D\uDCF1 Interno" to internal)
+        getExternalFilesDirs(null).filterNotNull().forEach { d ->
+            val p = d.path.substringBefore("/Android/")
+            val f = File(p)
+            if (f.path != internal.path && f.exists() && out.none { it.second.path == f.path }) {
+                out.add("\uD83D\uDCBE Cartão/USB (${f.name})" to f)
             }
         }
+        return out
+    }
+
+    private fun pickFolder(start: File, onPick: (File) -> Unit) {
+        var dir = if (start.isDirectory) start else Environment.getExternalStorageDirectory()
+        val vols = volumes()
+        val dlg = android.app.Dialog(this, android.R.style.Theme_Material_Light_NoActionBar)
+        val rootView = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(pal.bg) }
+
+        rootView.addView(tv("Escolher pasta de trabalho", 18f, pal.accent).apply {
+            typeface = Typeface.DEFAULT_BOLD
+            setBackgroundColor(pal.bar)
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+        })
+
+        // locais: armazenamentos e atalhos
+        val placesScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setBackgroundColor(pal.side)
+        }
+        val places = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        placesScroll.addView(places)
+        rootView.addView(placesScroll)
+
+        // trilha de navegação
+        val crumbScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val crumbs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        crumbScroll.addView(crumbs)
+        rootView.addView(crumbScroll, LinearLayout.LayoutParams(-1, dp(44)))
+
+        var list: List<Row> = emptyList()
+        val lv = ListView(this)
+        lv.divider = null
+        lv.adapter = object : BaseAdapter() {
+            override fun getCount() = list.size
+            override fun getItem(p: Int): Any = list[p]
+            override fun getItemId(p: Int) = p.toLong()
+            override fun getView(p: Int, v: View?, parent: ViewGroup): View = rowView(list[p])
+        }
+        lv.setOnItemClickListener { _, _, pos, _ -> list.getOrNull(pos)?.onClick?.invoke() }
+        rootView.addView(lv, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        val selected = tv("", 12f, pal.dim).apply {
+            setPadding(dp(16), dp(8), dp(16), dp(2))
+            setBackgroundColor(pal.bar)
+        }
+        rootView.addView(selected)
+        val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(pal.bar) }
+        rootView.addView(bottom)
+
+        fun load() {
+            val vol = vols.firstOrNull { dir.path == it.second.path || dir.path.startsWith(it.second.path + "/") }
+            // trilha
+            crumbs.removeAllViews()
+            val chain = ArrayList<File>()
+            var f: File? = dir
+            while (f != null) {
+                chain.add(0, f)
+                if (vol != null && f.path == vol.second.path) break
+                f = f.parentFile
+            }
+            chain.forEachIndexed { i, d ->
+                val label = if (i == 0 && vol != null) vol.first else d.name.ifEmpty { "/" }
+                crumbs.addView(tv(label, 14f, pal.accent).apply {
+                    setPadding(dp(10), dp(10), dp(6), dp(10))
+                    setOnClickListener { dir = d; load() }
+                })
+                if (i < chain.size - 1) crumbs.addView(tv("\u203A", 14f, pal.dim))
+            }
+            crumbScroll.post { crumbScroll.fullScroll(View.FOCUS_RIGHT) }
+
+            // lista de subpastas
+            val out = ArrayList<Row>()
+            val kids = dir.listFiles()
+            if (kids == null) {
+                out.add(Row("Sem acesso a esta pasta", "Verifique a permissão \"gerenciar todos os arquivos\" nas configurações do app", onClick = {}))
+            } else {
+                val par = dir.parentFile
+                if (par != null && dir.path != "/" && (vol == null || vol.second.path != dir.path)) {
+                    out.add(Row("Subir um nível", par.name.ifEmpty { "/" }, icon = "\u2B06", onClick = { dir = par; load() }))
+                }
+                kids.filter { it.isDirectory && !it.name.startsWith(".") }
+                    .sortedBy { it.name.lowercase() }
+                    .forEach { d ->
+                        val inner = d.listFiles()
+                        val subs = inner?.count { it.isDirectory } ?: 0
+                        val notes = inner?.count { it.isFile && it.extension.equals("md", true) } ?: 0
+                        val info = listOfNotNull(
+                            if (subs > 0) "$subs pasta(s)" else null,
+                            if (notes > 0) "$notes nota(s)" else null
+                        ).joinToString(" \u00B7 ")
+                        out.add(Row(d.name, info, icon = "\uD83D\uDCC1", onClick = { dir = d; load() }))
+                    }
+                if (out.none { it.icon == "\uD83D\uDCC1" }) {
+                    out.add(Row("Nenhuma subpasta aqui", "Use \"Nova pasta\" ou escolha esta pasta", onClick = {}))
+                }
+            }
+            list = out
+            (lv.adapter as BaseAdapter).notifyDataSetChanged()
+            selected.text = "Selecionada: ${dir.path}"
+        }
+
+        // chips de locais
+        vols.forEach { (label, f) -> places.addView(flatButton(label, pal) { dir = f; load() }) }
+        val internal = Environment.getExternalStorageDirectory()
+        listOf("\u2B07 Downloads" to "Download", "\uD83D\uDCC4 Documentos" to "Documents", "\u270E ZetLite" to "ZetLite")
+            .forEach { (label, name) ->
+                val f = File(internal, name)
+                if (f.isDirectory) places.addView(flatButton(label, pal) { dir = f; load() })
+            }
+
+        bottom.addView(flatButton("+ Nova pasta", pal) {
+            ask("Nome da nova pasta") { n ->
+                if (n.isNotBlank()) {
+                    val d = File(dir, n.trim())
+                    if (d.mkdirs()) { dir = d; load() } else toast("Não foi possível criar a pasta")
+                }
+            }
+        })
+        bottom.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        bottom.addView(flatButton("Cancelar", pal) { dlg.dismiss() })
+        bottom.addView(flatButton("Usar esta pasta", pal) { dlg.dismiss(); onPick(dir) }.apply {
+            typeface = Typeface.DEFAULT_BOLD
+        })
+
+        dlg.setContentView(rootView)
+        dlg.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        dlg.window?.statusBarColor = pal.bar
         dlg.show()
         load()
     }
