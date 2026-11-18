@@ -14,6 +14,14 @@ class Pal(dark: Boolean) {
     val bar = if (dark) Color.parseColor("#22262b") else Color.parseColor("#eef3f1")
     val side = if (dark) Color.parseColor("#1c1f23") else Color.parseColor("#f5f7f6")
     val accent = if (dark) Color.parseColor("#6fd0b5") else Color.parseColor("#1b9e77")
+    val link = if (dark) Color.parseColor("#8ab4f8") else Color.parseColor("#1a5fd0")
+    val bold = if (dark) Color.parseColor("#ffb86b") else Color.parseColor("#b45309")
+    val italic = if (dark) Color.parseColor("#c39bff") else Color.parseColor("#7c3aed")
+    val note = if (dark) Color.parseColor("#5ad1e6") else Color.parseColor("#0e7490")
+    val cite = if (dark) Color.parseColor("#f78fb3") else Color.parseColor("#be185d")
+    val math = if (dark) Color.parseColor("#e0a458") else Color.parseColor("#b5651d")
+    val codeFg = if (dark) Color.parseColor("#e6b673") else Color.parseColor("#9a3412")
+    val codeBg = if (dark) Color.parseColor("#2c3138") else Color.parseColor("#e8ece9")
     val dim = if (dark) Color.parseColor("#8a9099") else Color.parseColor("#6b7280")
 }
 

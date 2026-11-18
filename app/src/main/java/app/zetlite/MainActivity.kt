@@ -25,8 +25,11 @@ import android.text.TextWatcher
 import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
 import android.text.style.RelativeSizeSpan
+import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
+import android.text.style.UnderlineSpan
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebResourceRequest
@@ -78,7 +81,11 @@ class MainActivity : Activity() {
     private var focus = false
     private var dirty = false
     private var loading = false
-    private var query = ""
+    private var qSearch = ""
+    private var qRefs = ""
+    private var settingText = false
+    private val applied = ArrayList<Any>()
+    private lateinit var saveBtn: TextView
     private var rows: List<Row> = emptyList()
     private val expanded = HashSet<String>()
     private lateinit var selDir: File
@@ -242,11 +249,11 @@ class MainActivity : Activity() {
 
         // seções
         val seg = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val icons = listOf("📁", "🔍", "#", "🔗", "≡")
+        val icons = listOf("📁", "🔍", "#", "🔗", "≡", "📚")
         icons.forEachIndexed { i, ic ->
             val b = tv(ic, 18f).apply {
                 gravity = Gravity.CENTER
-                setOnClickListener { section = i; refreshSide() }
+                setOnClickListener { goSection(i) }
             }
             secBtns.add(b)
             seg.addView(b, LinearLayout.LayoutParams(0, dp(44), 1f))
@@ -269,7 +276,9 @@ class MainActivity : Activity() {
             setPadding(dp(14), dp(8), dp(14), dp(8))
             addTextChangedListener(object : TextWatcher {
                 override fun afterTextChanged(s: Editable?) {
-                    query = s.toString(); if (section == 1) refreshSide()
+                    if (settingText) return
+                    if (section == 1) qSearch = s.toString() else if (section == 5) qRefs = s.toString()
+                    if (section == 1 || section == 5) refreshSide()
                 }
                 override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
                 override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
@@ -329,6 +338,9 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
         }
         topBar.addView(title)
+        saveBtn = flatButton("💾 Salvar", pal) { saveNow() }
+        saveBtn.visible(false)
+        topBar.addView(saveBtn)
         modeBtn = flatButton("Editor", pal) { cycleMode() }
         topBar.addView(modeBtn)
         lateinit var more: View
@@ -360,7 +372,9 @@ class MainActivity : Activity() {
             addTextChangedListener(object : TextWatcher {
                 override fun afterTextChanged(s: Editable?) {
                     if (loading) return
+                    val was = dirty
                     dirty = true
+                    if (!was) { saveBtn.visible(true); renderTabs() }
                     ui.removeCallbacks(saveTask); ui.postDelayed(saveTask, 1500)
                     ui.removeCallbacks(hlTask); ui.postDelayed(hlTask, 250)
                     if (mode == 2) { ui.removeCallbacks(prevTask); ui.postDelayed(prevTask, 700) }
@@ -470,8 +484,15 @@ class MainActivity : Activity() {
             b.setBackgroundColor(if (i == section) pal.bg else 0)
             b.setTextColor(if (i == section) pal.accent else pal.dim)
         }
-        sideTools.visible(section == 0)
-        sideSearch.visible(section == 1)
+        sideTools.removeAllViews()
+        if (section == 0) {
+            sideTools.addView(flatButton("+ Nota", pal) { newNote(selDir) })
+            sideTools.addView(flatButton("+ Pasta", pal) { newFolder(selDir) })
+        } else if (section == 5) {
+            sideTools.addView(flatButton("Zotero / arquivos…", pal) { zoteroMenu() })
+        }
+        sideTools.visible(section == 0 || section == 5)
+        sideSearch.visible(section == 1 || section == 5)
         val list = ArrayList<Row>()
         when (section) {
             0 -> {
@@ -480,7 +501,7 @@ class MainActivity : Activity() {
                 if (list.isEmpty()) list.add(Row("Pasta vazia. Toque em + Nota.", icon = "", onClick = {}))
             }
             1 -> {
-                sideTitle.text = if (query.isBlank()) "NOTAS RECENTES" else "RESULTADOS"
+                sideTitle.text = if (qSearch.isBlank()) "NOTAS RECENTES" else "RESULTADOS"
                 searchRows(list)
             }
             2 -> {
@@ -488,7 +509,7 @@ class MainActivity : Activity() {
                 val tags = store.allTags()
                 tags.forEach { (t, n) ->
                     list.add(Row("#$t", "$n nota(s)", icon = "#", onClick = {
-                        section = 1; sideSearch.setText("#$t"); refreshSide()
+                        goSection(1, "#$t")
                     }))
                 }
                 if (tags.isEmpty()) list.add(Row("Nenhuma tag. Escreva #tag no texto.", onClick = {}))
@@ -527,6 +548,26 @@ class MainActivity : Activity() {
                 }
                 if (list.isEmpty()) list.add(Row("Sem títulos (#) nesta nota.", onClick = {}))
             }
+            5 -> {
+                val files = store.bibFiles()
+                val all = store.refs()
+                sideTitle.text = "REFERÊNCIAS · ${all.size} em ${files.size} arquivo(s) · toque para citar"
+                val q = qRefs.trim().lowercase()
+                if (q.isEmpty()) files.forEach { f ->
+                    list.add(Row(f.name, "${store.refsOf(f).size} entradas · ${f.parent}", icon = "📖",
+                        onClick = { refFileActions(f) }, onLong = { refFileActions(f) }))
+                }
+                val found = if (q.isEmpty()) all else all.filter {
+                    (it.key + " " + it.label + " " + it.title + " " + it.authors).lowercase().contains(q)
+                }
+                found.take(200).forEach { r ->
+                    list.add(Row(r.label, (if (r.title.isNotEmpty()) r.title + " · " else "") + "@" + r.key,
+                        icon = "@", onClick = { insertCitation(r.key) }))
+                }
+                if (all.isEmpty()) list.add(Row("Nenhuma referência ainda",
+                    "Toque aqui para sincronizar com o Zotero ou escolher um arquivo .bib/.json", onClick = { zoteroMenu() }))
+                else if (found.isEmpty()) list.add(Row("Nada encontrado.", onClick = {}))
+            }
         }
         rows = list
         (sideList.adapter as BaseAdapter).notifyDataSetChanged()
@@ -557,7 +598,7 @@ class MainActivity : Activity() {
     }
 
     private fun searchRows(out: MutableList<Row>) {
-        val q = query.trim().lowercase()
+        val q = qSearch.trim().lowercase()
         val notes = store.notes()
         if (q.isEmpty()) {
             notes.take(30).forEach { f -> out.add(Row(store.title(f), icon = "•", onClick = { openFile(f) })) }
@@ -584,7 +625,7 @@ class MainActivity : Activity() {
     private fun renderAll() {
         renderTabs()
         loadCurrent()
-        refreshSide()
+        goSection(section)
     }
 
     private fun renderTabs() {
@@ -596,7 +637,7 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER_VERTICAL
                 setBackgroundColor(if (active) pal.bg else 0)
             }
-            cell.addView(tv(t.file.nameWithoutExtension.ifEmpty { t.file.name }, 14f,
+            cell.addView(tv((if (active && dirty) "● " else "") + t.file.nameWithoutExtension.ifEmpty { t.file.name }, 14f,
                 if (active) pal.accent else pal.dim).apply {
                 setPadding(dp(14), 0, dp(4), 0)
                 setSingleLine()
@@ -658,6 +699,7 @@ class MainActivity : Activity() {
         if (t == null) {
             loading = true; edit.setText(""); loading = false
             title.text = "ZetLite"
+            saveBtn.visible(false)
             status.text = ""
             applyMode()
             return
@@ -667,6 +709,7 @@ class MainActivity : Activity() {
         edit.setSelection(t.cursor.coerceIn(0, edit.text.length))
         loading = false
         dirty = false
+        saveBtn.visible(false)
         title.text = t.file.name
         highlight()
         updateStatus()
@@ -679,7 +722,54 @@ class MainActivity : Activity() {
         if (dirty) {
             store.write(t.file, edit.text.toString())
             dirty = false
+            saveBtn.visible(false)
+            renderTabs()
+            updateStatus()
         }
+    }
+
+    private fun saveNow() {
+        if (cur < 0) return
+        val was = dirty
+        saveCurrent()
+        toast(if (was) "Salvo" else "Já está salvo")
+    }
+
+    /** Atalhos de teclado físico (tablets/teclado Bluetooth). */
+    override fun dispatchKeyEvent(e: KeyEvent): Boolean {
+        if (e.action == KeyEvent.ACTION_DOWN && e.isCtrlPressed && e.repeatCount == 0) {
+            val handled = when (e.keyCode) {
+                KeyEvent.KEYCODE_S -> { saveNow(); true }
+                KeyEvent.KEYCODE_B -> { wrap("**", "**"); true }
+                KeyEvent.KEYCODE_I -> { wrap("*", "*"); true }
+                KeyEvent.KEYCODE_K -> { wrap("[", "](url)"); true }
+                KeyEvent.KEYCODE_N -> { newNote(selDir); true }
+                KeyEvent.KEYCODE_O -> { workspaceMenu(); true }
+                KeyEvent.KEYCODE_W -> { if (cur >= 0) closeTab(cur); true }
+                KeyEvent.KEYCODE_P -> { if (cur >= 0) cycleMode(); true }
+                KeyEvent.KEYCODE_F -> { goSection(1); setSide(true); sideSearch.requestFocus(); true }
+                KeyEvent.KEYCODE_BACKSLASH -> {
+                    if (wide) { sideOpen = !sideOpen; applySide(false) } else setSide(!sideOpen); true
+                }
+                KeyEvent.KEYCODE_TAB -> {
+                    if (tabs.size > 1) switchTo(if (e.isShiftPressed) (cur - 1 + tabs.size) % tabs.size else (cur + 1) % tabs.size)
+                    true
+                }
+                else -> false
+            }
+            if (handled) return true
+        }
+        return super.dispatchKeyEvent(e)
+    }
+
+    private fun goSection(i: Int, text: String? = null) {
+        section = i
+        if (i == 1 && text != null) qSearch = text
+        settingText = true
+        sideSearch.setText(if (i == 1) qSearch else if (i == 5) qRefs else "")
+        sideSearch.hint = if (i == 5) "Buscar referência (autor, título, chave)" else "Buscar em todas as notas"
+        settingText = false
+        refreshSide()
     }
 
     // ------------------------------------------------------------------ modos
@@ -762,56 +852,216 @@ class MainActivity : Activity() {
             }.show()
     }
 
+    /** Botão [@]: abre o painel Referências na barra lateral; tocar em uma referência insere [@chave]. */
     private fun pickCitation() {
         if (cur < 0) return
-        val bib = store.bib()
-        if (bib.isEmpty()) { toast("Coloque um arquivo .bib na pasta de trabalho"); return }
-        val keys = bib.keys.toList()
-        AlertDialog.Builder(this).setTitle("Inserir citação")
-            .setItems(keys.map { "$it — ${bib[it]}" }.toTypedArray()) { _, i -> insert("[@${keys[i]}]") }
-            .show()
+        goSection(5)
+        setSide(true)
     }
 
-    private val hl = listOf(
-        Regex("(?m)^#{1,6} .*$") to 0,
-        Regex("\\*\\*[^*\\n]+\\*\\*") to 1,
-        Regex("(?<!\\*)\\*[^*\\n]+\\*(?!\\*)") to 2,
-        Regex("`[^`\\n]+`") to 3,
-        Regex("\\[\\[[^\\]\\n]+\\]\\]") to 4,
-        Regex("\\[@[^\\]\\n]+\\]") to 4,
-        Regex("(?<![\\w&;#/\"=])#[\\p{L}][\\p{L}\\p{N}_/\\-]*") to 4,
-        Regex("\\$[^$\\n]+\\$") to 5,
-        Regex("(?m)^>.*$") to 6,
-        Regex("(?m)^\\s*([-*+]|\\d+\\.)\\s") to 4
-    )
+    private fun insertCitation(key: String) {
+        if (cur < 0) { toast("Abra uma nota para inserir a citação"); return }
+        if (mode == 1) setMode(0)
+        insert("[@$key]")
+        if (!wide) setSide(false)
+        edit.requestFocus()
+        toast("Inserido [@$key]")
+    }
+
+    // ------------------------------------------------------------------ realce de sintaxe
+    private fun sp(t: Editable, what: Any, s: Int, e: Int) {
+        if (e <= s) return
+        t.setSpan(what, s, e, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        applied.add(what)
+    }
+
+    private val reHead = Regex("(?m)^(#{1,6}) .*$")
+    private val reQuote = Regex("(?m)^>.*$")
+    private val reListM = Regex("(?m)^\\s*([-*+]|\\d+[.)])\\s(\\[[ xX]\\]\\s)?")
+    private val reHrule = Regex("(?m)^\\s*([-*_])(\\s*\\1){2,}\\s*$")
+    private val reBoldH = Regex("\\*\\*[^*\\n]+\\*\\*|__[^_\\n]+__")
+    private val reItalH = Regex("(?<![*\\w])\\*(?!\\*)[^*\\n]+\\*(?!\\*)|(?<![\\w_])_[^_\\n]+_(?![\\w_])")
+    private val reStrikeH = Regex("~~[^~\\n]+~~")
+    private val reCodeH = Regex("`[^`\\n]+`")
+    private val reMathH = Regex("\\$[^$\\n]+\\$")
+    private val reUrlH = Regex("https?://[^\\s)\\]]+")
+    private val reLinkH = Regex("!?\\[([^\\]\\n]+)\\]\\(([^)\\n]+)\\)")
+    private val reWikiH = Regex("\\[\\[[^\\]\\n]+\\]\\]")
+    private val reFnDefH = Regex("(?m)^\\[\\^[^\\]\\n]+\\]:")
+    private val reFnRefH = Regex("\\[\\^[^\\]\\n]+\\](?!:)")
+    private val reCiteH = Regex("\\[@[^\\]\\n]+\\]")
+    private val reTagH = Regex("(?<![\\w&;#/\"=])#[\\p{L}][\\p{L}\\p{N}_/\\-]*")
+    private val reFenceH = Regex("(?s)```.*?```")
 
     private fun highlight() {
         val t = edit.text
-        t.getSpans(0, t.length, ForegroundColorSpan::class.java).forEach { t.removeSpan(it) }
-        t.getSpans(0, t.length, StyleSpan::class.java).forEach { t.removeSpan(it) }
-        t.getSpans(0, t.length, BackgroundColorSpan::class.java).forEach { t.removeSpan(it) }
-        t.getSpans(0, t.length, RelativeSizeSpan::class.java).forEach { t.removeSpan(it) }
-        val fl = Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
-        val code = if (store.dark) Color.parseColor("#2c3138") else Color.parseColor("#e8ece9")
-        hl.forEach { (re, kind) ->
-            re.findAll(t).forEach { m ->
-                val s = m.range.first
-                val e = m.range.last + 1
-                when (kind) {
-                    0 -> {
-                        t.setSpan(ForegroundColorSpan(pal.accent), s, e, fl)
-                        t.setSpan(StyleSpan(Typeface.BOLD), s, e, fl)
-                        t.setSpan(RelativeSizeSpan(1.15f), s, e, fl)
-                    }
-                    1 -> t.setSpan(StyleSpan(Typeface.BOLD), s, e, fl)
-                    2 -> t.setSpan(StyleSpan(Typeface.ITALIC), s, e, fl)
-                    3 -> t.setSpan(BackgroundColorSpan(code), s, e, fl)
-                    4 -> t.setSpan(ForegroundColorSpan(pal.accent), s, e, fl)
-                    5 -> t.setSpan(ForegroundColorSpan(Color.parseColor("#b5651d")), s, e, fl)
-                    6 -> t.setSpan(ForegroundColorSpan(pal.dim), s, e, fl)
-                }
-            }
+        applied.forEach { t.removeSpan(it) }
+        applied.clear()
+        val sizes = floatArrayOf(1f, 1.45f, 1.3f, 1.18f, 1.1f, 1.05f, 1f)
+
+        reHead.findAll(t).forEach { m ->
+            val s = m.range.first; val e = m.range.last + 1
+            sp(t, ForegroundColorSpan(pal.accent), s, e)
+            sp(t, StyleSpan(Typeface.BOLD), s, e)
+            sp(t, RelativeSizeSpan(sizes[m.groupValues[1].length]), s, e)
         }
+        reQuote.findAll(t).forEach { m ->
+            sp(t, ForegroundColorSpan(pal.dim), m.range.first, m.range.last + 1)
+            sp(t, StyleSpan(Typeface.ITALIC), m.range.first, m.range.last + 1)
+        }
+        reListM.findAll(t).forEach { m ->
+            sp(t, ForegroundColorSpan(pal.accent), m.range.first, m.range.last + 1)
+            sp(t, StyleSpan(Typeface.BOLD), m.range.first, m.range.last + 1)
+        }
+        reHrule.findAll(t).forEach { m -> sp(t, ForegroundColorSpan(pal.dim), m.range.first, m.range.last + 1) }
+
+        // negrito (laranja) e itálico (roxo); os marcadores ficam apagados
+        reBoldH.findAll(t).forEach { m ->
+            val s = m.range.first; val e = m.range.last + 1
+            sp(t, StyleSpan(Typeface.BOLD), s, e)
+            sp(t, ForegroundColorSpan(pal.bold), s, e)
+            sp(t, ForegroundColorSpan(pal.dim), s, s + 2)
+            sp(t, ForegroundColorSpan(pal.dim), e - 2, e)
+        }
+        reItalH.findAll(t).forEach { m ->
+            val s = m.range.first; val e = m.range.last + 1
+            sp(t, StyleSpan(Typeface.ITALIC), s, e)
+            sp(t, ForegroundColorSpan(pal.italic), s, e)
+            sp(t, ForegroundColorSpan(pal.dim), s, s + 1)
+            sp(t, ForegroundColorSpan(pal.dim), e - 1, e)
+        }
+        reStrikeH.findAll(t).forEach { m ->
+            sp(t, StrikethroughSpan(), m.range.first, m.range.last + 1)
+            sp(t, ForegroundColorSpan(pal.dim), m.range.first, m.range.last + 1)
+        }
+        reCodeH.findAll(t).forEach { m ->
+            sp(t, BackgroundColorSpan(pal.codeBg), m.range.first, m.range.last + 1)
+            sp(t, ForegroundColorSpan(pal.codeFg), m.range.first, m.range.last + 1)
+        }
+        reMathH.findAll(t).forEach { m -> sp(t, ForegroundColorSpan(pal.math), m.range.first, m.range.last + 1) }
+
+        // links: texto sublinhado em azul, endereço em cor fraca
+        reUrlH.findAll(t).forEach { m ->
+            sp(t, ForegroundColorSpan(pal.link), m.range.first, m.range.last + 1)
+            sp(t, UnderlineSpan(), m.range.first, m.range.last + 1)
+        }
+        reLinkH.findAll(t).forEach { m ->
+            sp(t, ForegroundColorSpan(pal.dim), m.range.first, m.range.last + 1)
+            val g = m.groups[1]!!.range
+            sp(t, ForegroundColorSpan(pal.link), g.first, g.last + 1)
+            sp(t, UnderlineSpan(), g.first, g.last + 1)
+        }
+        reWikiH.findAll(t).forEach { m ->
+            sp(t, ForegroundColorSpan(pal.accent), m.range.first, m.range.last + 1)
+            sp(t, UnderlineSpan(), m.range.first, m.range.last + 1)
+        }
+
+        // notas de rodapé (azul-petróleo) e citações (rosa)
+        reFnDefH.findAll(t).forEach { m ->
+            sp(t, ForegroundColorSpan(pal.note), m.range.first, m.range.last + 1)
+            sp(t, StyleSpan(Typeface.BOLD), m.range.first, m.range.last + 1)
+        }
+        reFnRefH.findAll(t).forEach { m ->
+            sp(t, ForegroundColorSpan(pal.note), m.range.first, m.range.last + 1)
+            sp(t, RelativeSizeSpan(0.85f), m.range.first, m.range.last + 1)
+        }
+        reCiteH.findAll(t).forEach { m ->
+            sp(t, ForegroundColorSpan(pal.cite), m.range.first, m.range.last + 1)
+            sp(t, StyleSpan(Typeface.BOLD), m.range.first, m.range.last + 1)
+        }
+        reTagH.findAll(t).forEach { m -> sp(t, ForegroundColorSpan(pal.accent), m.range.first, m.range.last + 1) }
+
+        // blocos de código por último: ignoram o realce interno
+        reFenceH.findAll(t).forEach { m ->
+            sp(t, BackgroundColorSpan(pal.codeBg), m.range.first, m.range.last + 1)
+            sp(t, ForegroundColorSpan(pal.codeFg), m.range.first, m.range.last + 1)
+        }
+    }
+
+    // ------------------------------------------------------------------ referências / Zotero
+    private fun zoteroMenu() {
+        AlertDialog.Builder(this).setTitle("Referências")
+            .setItems(arrayOf(
+                "Sincronizar com o Zotero (internet)",
+                "Escolher arquivo .bib / .json do aparelho",
+                "Como exportar do Zotero"
+            )) { _, i ->
+                when (i) { 0 -> zoteroSync(); 1 -> pickRefFile(); 2 -> zoteroHelp() }
+            }.show()
+    }
+
+    private fun pickRefFile() {
+        pickFolder(store.root, listOf("bib", "json")) { f ->
+            store.addBib(f)
+            toast("Adicionado: ${f.name} (${store.refsOf(f).size} referências)")
+            goSection(5)
+        }
+    }
+
+    private fun refFileActions(f: File) {
+        val extra = store.isExtraBib(f)
+        val opts = ArrayList<String>()
+        val acts = ArrayList<() -> Unit>()
+        if (f.extension.equals("bib", true)) { opts.add("Abrir no editor"); acts.add { openFile(f) } }
+        if (extra) { opts.add("Remover da lista (não apaga o arquivo)"); acts.add { store.removeBib(f); goSection(5) } }
+        else { opts.add("Está na pasta de trabalho"); acts.add { toast("Qualquer .bib da pasta de trabalho é lido automaticamente") } }
+        AlertDialog.Builder(this).setTitle(f.name)
+            .setItems(opts.toTypedArray()) { _, i -> acts[i]() }.show()
+    }
+
+    private fun zoteroSync() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+        }
+        box.addView(TextView(this).apply {
+            text = "No site zotero.org/settings/keys copie o seu \"userID\" (número) e crie uma chave de API com acesso somente leitura à sua biblioteca. O ZetLite baixa as referências para o arquivo zotero.bib na pasta de trabalho."
+            textSize = 13f
+        })
+        val id = EditText(this).apply {
+            hint = "ID numérico do usuário"
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(store.zotUser)
+        }
+        val key = EditText(this).apply {
+            hint = "Chave de API"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(store.zotKey)
+        }
+        box.addView(id); box.addView(key)
+        AlertDialog.Builder(this).setTitle("Sincronizar com o Zotero").setView(box)
+            .setPositiveButton("Sincronizar") { _, _ ->
+                val uid = id.text.toString().trim()
+                val k = key.text.toString().trim()
+                if (uid.isEmpty()) { toast("Informe o ID do usuário"); return@setPositiveButton }
+                store.zotUser = uid; store.zotKey = k
+                store.ensureRoot()
+                toast("Baixando referências…")
+                Thread {
+                    try {
+                        val txt = Zotero.fetchBibtex(uid, k)
+                        val f = File(store.root, "zotero.bib")
+                        f.writeText(txt)
+                        val n = store.refsOf(f).size
+                        runOnUiThread { toast("Zotero: $n referências salvas em zotero.bib", true); goSection(5) }
+                    } catch (e: Exception) {
+                        runOnUiThread { toast("Falha: ${e.message ?: "sem conexão"}", true) }
+                    }
+                }.start()
+            }.setNegativeButton("Cancelar", null).show()
+    }
+
+    private fun zoteroHelp() {
+        AlertDialog.Builder(this).setTitle("Como usar o Zotero")
+            .setMessage(
+                "O ZetLite lê referências de arquivos BibTeX (.bib) ou CSL JSON (.json).\n\n" +
+                    "A) Pela internet: use \"Sincronizar com o Zotero\". Você precisa do userID e de uma chave de API somente leitura (zotero.org/settings/keys).\n\n" +
+                    "B) Pelo computador: no Zotero, clique com o botão direito na coleção > Exportar > BibTeX (ou CSL JSON). " +
+                    "Se usar o plugin Better BibTeX, dá para manter o arquivo atualizado automaticamente. " +
+                    "Leve o arquivo ao celular (Syncthing, Google Drive etc.) e escolha-o em \"Escolher arquivo .bib / .json\".\n\n" +
+                    "Se o .bib estiver dentro da pasta de trabalho, ele é lido sozinho.\n\n" +
+                    "Para citar: botão [@] da barra de formatação, ou a aba 📚 da barra lateral. Escreva [@chave] no texto."
+            ).setPositiveButton("OK", null).show()
     }
 
     private fun updateStatus() {
@@ -819,7 +1069,8 @@ class MainActivity : Activity() {
         val w = edit.text.toString().split(Regex("\\s+")).count { it.isNotEmpty() }
         val tg = store.target(t.file)
         status.text = "$w palavras · ${edit.text.length} caracteres" +
-            if (tg > 0) " · meta $tg (${(w * 100 / tg).coerceAtMost(999)}%)" else ""
+            (if (tg > 0) " · meta $tg (${(w * 100 / tg).coerceAtMost(999)}%)" else "") +
+            (if (dirty) " · ● não salvo" else " · ✓ salvo")
     }
 
     private fun setTarget() {
@@ -872,13 +1123,13 @@ class MainActivity : Activity() {
         return out
     }
 
-    private fun pickFolder(start: File, onPick: (File) -> Unit) {
+    private fun pickFolder(start: File, exts: List<String>? = null, onPick: (File) -> Unit) {
         var dir = if (start.isDirectory) start else Environment.getExternalStorageDirectory()
         val vols = volumes()
         val dlg = android.app.Dialog(this, android.R.style.Theme_Material_Light_NoActionBar)
         val rootView = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(pal.bg) }
 
-        rootView.addView(tv("Escolher pasta de trabalho", 18f, pal.accent).apply {
+        rootView.addView(tv(if (exts == null) "Escolher pasta de trabalho" else "Escolher arquivo de referências (.bib / .json)", 18f, pal.accent).apply {
             typeface = Typeface.DEFAULT_BOLD
             setBackgroundColor(pal.bar)
             setPadding(dp(16), dp(14), dp(16), dp(14))
@@ -962,13 +1213,23 @@ class MainActivity : Activity() {
                         ).joinToString(" \u00B7 ")
                         out.add(Row(d.name, info, icon = "\uD83D\uDCC1", onClick = { dir = d; load() }))
                     }
-                if (out.none { it.icon == "\uD83D\uDCC1" }) {
+                if (exts != null) {
+                    kids.filter { it.isFile && it.extension.lowercase() in exts }
+                        .sortedBy { it.name.lowercase() }
+                        .forEach { f ->
+                            out.add(Row(f.name, "${f.length() / 1024} KB", icon = "\uD83D\uDCD6",
+                                onClick = { dlg.dismiss(); onPick(f) }))
+                        }
+                    if (out.none { it.icon == "\uD83D\uDCC1" || it.icon == "\uD83D\uDCD6" }) {
+                        out.add(Row("Nenhum arquivo .bib/.json aqui", "Navegue pelas pastas acima", onClick = {}))
+                    }
+                } else if (out.none { it.icon == "\uD83D\uDCC1" }) {
                     out.add(Row("Nenhuma subpasta aqui", "Use \"Nova pasta\" ou escolha esta pasta", onClick = {}))
                 }
             }
             list = out
             (lv.adapter as BaseAdapter).notifyDataSetChanged()
-            selected.text = "Selecionada: ${dir.path}"
+            selected.text = if (exts == null) "Selecionada: ${dir.path}" else "Toque em um arquivo para escolher"
         }
 
         // chips de locais
@@ -990,7 +1251,7 @@ class MainActivity : Activity() {
         })
         bottom.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         bottom.addView(flatButton("Cancelar", pal) { dlg.dismiss() })
-        bottom.addView(flatButton("Usar esta pasta", pal) { dlg.dismiss(); onPick(dir) }.apply {
+        if (exts == null) bottom.addView(flatButton("Usar esta pasta", pal) { dlg.dismiss(); onPick(dir) }.apply {
             typeface = Typeface.DEFAULT_BOLD
         })
 
@@ -1065,6 +1326,7 @@ class MainActivity : Activity() {
     private fun showMenu(anchor: View) {
         val has = cur >= 0
         PopupMenu(this, anchor).apply {
+            menu.add(0, 10, 0, "Salvar (Ctrl+S)").isEnabled = has
             menu.add(0, 1, 0, "Nova nota")
             menu.add(0, 2, 1, "Nova pasta")
             menu.add(0, 3, 2, "Abrir pasta de trabalho")
@@ -1073,7 +1335,8 @@ class MainActivity : Activity() {
             menu.add(0, 6, 5, "Modo foco").isEnabled = has
             menu.add(0, 7, 6, "Meta de palavras").isEnabled = has
             menu.add(0, 8, 7, if (store.dark) "Tema claro" else "Tema escuro")
-            menu.add(0, 9, 8, "Ajuda de sintaxe")
+            menu.add(0, 11, 8, "Referências / Zotero")
+            menu.add(0, 9, 9, "Ajuda de sintaxe")
             setOnMenuItemClickListener {
                 when (it.itemId) {
                     1 -> newNote(selDir)
@@ -1085,6 +1348,8 @@ class MainActivity : Activity() {
                     7 -> setTarget()
                     8 -> { saveCurrent(); store.dark = !store.dark; buildUi(); renderAll() }
                     9 -> showHelp()
+                    10 -> saveNow()
+                    11 -> { goSection(5); setSide(true) }
                 }
                 true
             }
@@ -1122,9 +1387,11 @@ class MainActivity : Activity() {
                     "> citação\n[[outra nota]]  link entre notas\n#tag  etiqueta\n[texto](https://...)  link\n" +
                     "[@chave]  citação (arquivo .bib na pasta)\nTexto[^1]  e depois  [^1]: nota de rodapé\n" +
                     "| A | B |  tabela\n\nDicas:\n• ☰ abre a barra lateral\n• Toque longo em um arquivo: renomear/excluir\n" +
-                    "• O botão Editor/Prévia/Dividido alterna a visualização"
+                    "• O botão Editor/Prévia/Dividido alterna a visualização\n• Salva sozinho; 💾 ou Ctrl+S salva na hora\n" +
+                    "• Teclado físico: Ctrl+S salvar, B negrito, I itálico, K link, N nova nota, O abrir pasta, W fechar aba, P prévia, F buscar, \\ barra lateral, Tab próxima aba"
             ).setPositiveButton("OK", null).show()
     }
 
-    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+    private fun toast(s: String, long: Boolean = false) =
+        Toast.makeText(this, s, if (long) Toast.LENGTH_LONG else Toast.LENGTH_SHORT).show()
 }
